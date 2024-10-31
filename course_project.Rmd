@@ -1,0 +1,135 @@
+---
+title: 'Practical Machine Learning: Course Project'
+output: html_document
+---
+
+## Executive summary
+In this project I use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways. Each row contains the accelerometer readings for one barbell lift, with the `classe` variable recording the way they performed the lift (A, B, C, D, or E). 
+
+The goal is to develop a machine learning model that predicts the manner in which a participant did the exercise (the `classe` variable) based on accelerometer data. This report describes the process of building the model, estimates the out of sample error, and uses the model to predict 20 test cases for which `classe` is unknown.  
+
+## Setup
+Load required packages (assumes they are already installed).
+```{r, warning = FALSE, message = FALSE}
+library(caret)
+library(randomForest)
+library(dplyr)
+```
+
+In preparation for this assignment two data files were saved to the working directory:
+
+- _pml-training.csv_ - data for training and testing, including to estimate the out of sample error rate (19622 observations)
+- _pml-testing.csv_ - 20 observations without the _classe_ variable for the assignment quiz
+
+## Data exploration and preparation
+A review of the _pml-training.csv_ file reveals the presence of many _#DIV/0!_ values, likely an artifact of collecting the original data in Excel. For consistency these will be converted to NA when the file is imported.
+
+```{r}
+working_data <- read.csv("pml-training.csv", na.strings = "#DIV/0!") 
+pml_testing <- read.csv("pml-testing.csv")
+```
+
+At this stage the `working_data` dataframe has 160 variables: 159 potential predictors as well as the `classe` variable. Before splitting `working_data` into training and testing subsets it will be helpful to perform feature selection, reducing the data frame to variables that will contribute meaningfully to the prediction of `classe`.  Exploratory data analysis reveals variables that can be excluded altogether:
+
+- metadata features related to data collection but not useful for modelling 
+- features with a high number of NA values
+- features that are strongly correlated with each other
+
+### Unnecessary metadata
+Remove the first seven variables in `working_data` and convert the remaining features to `numeric` and `factor` where applicable.
+```{r}
+working_data <- working_data[,8:160]
+working_data <- type.convert(working_data, as.is = FALSE)
+```
+
+### Features with many NA values
+A glance at the data shows a high number of NAs for many variables. To help understand the pattern of NA occurence the code below counts the number of NAs in each column and plots a histogram showing the number of variables (y) and the number of NAs (x). 
+
+```{r}
+na_count <- data.frame(nas = colSums(is.na(working_data)))
+hist(na_count$nas)
+```
+
+The histogram shows that variables are either nearly complete (no NAs) or nearly incomplete (almost all values are NA). Viewing the `na_count` dataframe confirms that variables either have 0 NAs or at least 19216 NAs (i.e. in columns with at least one NA, **more than 97%** of values are NA). It is unlikely that variables with so few values will benefit a predictive model so they are also removed from `working_data`, resulting in a data frame with 53 variables.  
+
+```{r}
+# keep only columns with na count of 0
+working_data <- working_data[,colSums(is.na(working_data))==0]
+```
+
+### Highly correlated variables
+Including features that are highly correlated _with each other_ is redundant and it's better to remove collinear variables to avoid overfitting the model. The code below identifies variables with a correlation greater than .75 (absolute value), then removes them from the `working_data`. 
+```{r}
+# excludes `classe` (the last variable) which is a factor and cannot be used in the `cor` function
+highly_correlated_variables <- findCorrelation(cor(working_data[,-53]), cutoff = .75)
+
+# remove highly correlated variables
+working_data <- working_data[,-highly_correlated_variables]
+```
+
+The resulting data frame has 31 predictors compared to 159 in the original file. This is a much more manageable number for training the model. 
+
+### Check for "near zero variance" variables
+The `caret` package can also help with feature selection by identifying and removing variables with "near zero variance" (nzv), which have less predictive power and are unlikely to improve the model. The code below runs the "nzv" pre-processing method on the remaining predictors. The output indicates that 1 variable was ignored (the `classe` factor variable) and none was removed. Though it didn't reduce the number of features in this case, it is worth pre-processing with "nzv" as a precaution.
+
+```{r}
+working_data_nzv <- preProcess(working_data, method = c("nzv"))
+working_data_nzv
+```
+
+The remaining 31 predictors in `working_data` will be used for model building. For consistency, the original `pml_testing` data frame is also reduced to the same feature subset (note that `pml_testing` has a `problem_id` variable instead of `classe`).
+```{r}
+keep_cols <- colnames(working_data)[1:31]
+pml_testing <- select(pml_testing, c(keep_cols,"problem_id"))
+```
+
+## Build and select a model
+Models have different strengths and in some cases selection may be a balance between predictive power and interpretability. This project prioritizes predictive power and tests four methods: two models that are less interpretable but have fewer requirements of the data (random forests and boosting), as well as one that may be easier to interpret but has stricter data requirements (linear discriminate analysis). 
+
+First, create training and testing data frames. In this case 75% of the observations will be used for training
+```{r}
+set.seed(2255)
+trainIndex <- createDataPartition(working_data$classe, p = .75, list=FALSE)
+train_data <- working_data[trainIndex,]
+test_data <- working_data[-trainIndex,]
+```
+
+The `trainControl` function in the `caret` package can be used to cross validate all models. In this case it is set to use K-fold validation with five folds. The commands that generate the models also normalize the data by using the `preProcess` parameter to scale and center each predictor. 
+```{r warning = FALSE, message = FALSE, results='hide'}
+# set the cross validation parameters
+train_control<- trainControl(method="cv", number=5, savePredictions = TRUE)
+
+# build the competing models
+set.seed(501105)
+mod_rf <- train(classe ~ ., method="rf", data=train_data, preProcess=c("scale","center"), trControl=train_control)
+mod_gbm <- train(classe ~ ., method="gbm", data=train_data, preProcess=c("scale","center"), trControl=train_control)
+mod_lda <- train(classe ~ ., method="lda", data=train_data, preProcess=c("scale","center"), trControl=train_control)
+
+```
+
+The random forests model `mod_rf` is the most accurate with an in-sample accuracy of 0.9899, compared to 0.9462 for the boosting model `mod_gbm`. The linear discriminate analysis model `mod_lda` was considerably less accurate, suggesting that the data doesn't meet the assumptions for that linear method.  
+```{r}
+mod_rf$results$Accuracy[1]
+mod_gbm$results$Accuracy[9]
+mod_lda$results$Accuracy
+```
+
+## Estimate the out of sample error of `mod_rf`
+The `predict` function from the `caret` package applies the `mod_rf` model to the test data and a confusion matrix shows how the predictions compare to the actual values of the `classe` variable (A, B, C, D, or E). 
+```{r}
+pred_rf <- predict(mod_rf, test_data)
+cm <- confusionMatrix(pred_rf, test_data$classe)
+cm$table
+cm$overall
+```
+
+The accuracy of `model_rf` applied to the test data remains high at 0.9898, only slightly lower than the training data accuracy. The estimated out of sample error rate is therefore .0102.
+
+## Apply selected model to sample of 20 observations
+The final step is to use the selected model to predict the `classe` of the 20 observations in `pml_testing` for the quiz. The code below creates a new data frame with two columns: `problem_id` and `predicted_classe`.
+```{r}
+pred_quiz <- predict(mod_rf, pml_testing)
+quiz_answers <- data.frame(problem_id = pml_testing$problem_id, predicted_classe = pred_quiz)
+```
+
+The random forests model `mod_rf` successfully predicts the `classe` of all 20 observations in the quiz. 
